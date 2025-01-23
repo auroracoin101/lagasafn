@@ -1,16 +1,18 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import argparse
-import codecs
 import logging
 import os
-import string
-import StringIO
 import zipfile
+import string
+from io import StringIO
 
 import requests
 import roman
-import lxml.etree
+
+import lxml
+from lxml import etree
+import chardet  # Import chardet to detect encoding
 
 DEFAULT_LOGGING_LVL = logging.DEBUG
 
@@ -46,30 +48,59 @@ PAGE = {
 
 
 def download_and_extract_newest_lagasafn_zip(logger):
-    logger.info(u'Downloading newest lagasafn ZIP archive ..')
+    logger.info('Downloading newest lagasafn ZIP archive ..')
     zip_file_url = 'https://www.althingi.is/lagasafn/zip/nuna/allt.zip'
-    result = requests.get(zip_file_url, stream=True)
+    headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3' }
+    result = requests.get(zip_file_url, headers=headers, stream=True)
+    # result = requests.get(zip_file_url, stream=True)
     result.raise_for_status()
-    zip_archive = zipfile.ZipFile(StringIO.StringIO(result.content))
+    zip_archive = zipfile.ZipFile(StringIO(result.content))
     zip_archive.extractall(HTML_FOLDER)
     filelist = [f for f in os.listdir(HTML_FOLDER) if f.endswith('.html')]
     for filename in filelist:
-        logger.info(u'ZIP: Extracting %s ..', filename)
-        html_txt = u''
+        logger.info('ZIP: Extracting %s ..', filename)
+        html_txt = ''
         filename_pwd = os.path.join(HTML_FOLDER, filename)
-        # [althingi.is bad]
-        # codec seems to be "Western (Windows 1252)" or cp1252
-        with codecs.open(filename_pwd, 'r', 'cp1252') as html_file:
+        with open(filename_pwd, 'r', encoding='cp1252') as html_file:
             html_txt = html_file.read()
-        # rewrite html charset declaration
         html_txt = html_txt.replace('charset=iso-8859-1', 'charset=utf-8', 1)
-        # [althingi.is bad]
-        # deny javascript (mainly spy tools like google analytics anyway)
         html_txt = deny_js_scripts(html_txt)
-        # rewrite html files in superior utf-8 codec
-        with open(filename_pwd, 'w') as html_file:
-            html_file.write(html_txt.encode('utf-8'))
-    logger.info(u'ZIP: Extraction finished.')
+        with open(filename_pwd, 'w', encoding='utf-8') as html_file:
+            html_file.write(html_txt)
+
+def load_and_extract_lagasafn_zip(logger):
+    logger.info('Loading local lagasafn ZIP archive...')
+    zip_filename = 'allt.zip'  # This assumes 'allt.zip' is in the same directory as the script
+    try:
+        with zipfile.ZipFile(zip_filename, 'r') as zip_archive:
+            zip_archive.extractall(HTML_FOLDER)
+        filelist = [f for f in os.listdir(HTML_FOLDER) if f.endswith('.html')]
+        for filename in filelist:
+            logger.info('ZIP: Extracting %s ..', filename)
+            filename_pwd = os.path.join(HTML_FOLDER, filename)
+            logger.info('Reading %s using appropriate encoding...', filename_pwd)
+
+            # Detect and handle file encoding
+            with open(filename_pwd, 'rb') as file:
+                raw_data = file.read()
+                encoding = chardet.detect(raw_data)['encoding']
+                logger.info('Detected encoding %s for file %s', encoding, filename)
+
+            # Read file with detected encoding
+            with open(filename_pwd, 'r', encoding=encoding) as html_file:
+                html_txt = html_file.read()
+
+            # Correct charset and remove scripts
+            html_txt = html_txt.replace('charset=iso-8859-1', 'charset=utf-8', 1)
+            html_txt = deny_js_scripts(html_txt)
+
+            # Write file back in UTF-8
+            with open(filename_pwd, 'w', encoding='utf-8') as html_file:
+                html_file.write(html_txt)
+    except zipfile.BadZipFile:
+        logger.error("The provided ZIP file is corrupt.")
+    except FileNotFoundError:
+        logger.error("The ZIP file was not found in the expected location.")
 
 
 def deny_js_scripts(html_txt):
@@ -109,8 +140,10 @@ def convert_html_files_to_md_files(logger):
             continue
         html_txt = u''
         filename_pwd = os.path.join(HTML_FOLDER, filename)
-        with codecs.open(filename_pwd, 'r', 'utf-8') as html_file:
+        with open(filename_pwd, 'r', encoding='utf-8') as html_file:
             html_txt = html_file.read()
+        #with codecs.open(filename_pwd, 'r', 'utf-8') as html_file:
+        #    html_txt = html_file.read()
         # skip revoked laws
         if u'<small><b>Felld úr gildi skv. ' in html_txt:
             continue
@@ -120,15 +153,25 @@ def convert_html_files_to_md_files(logger):
             # [althingi.is bad]
             # sometimes felld úr gildi and sometimes fellt úr gildi ..
             continue
+        if html_txt is None:
+            logger.error('Failed to parse %s, skipping.',filename_pwd)
+            continue
         md_text = parse_html_to_md(logger, filename, html_txt, data)
+
+        if md_text is None:
+            logger.info("No Markdown generated for '{%s}'.", filename)
+            continue # Optionally handle or log the absence of generated Markdown
         if filename == PAGE['index']:
             # index equilavent in markdown is README
             md_filename = 'README.md'
         else:
             md_filename = filename.replace('.html', '.md')
         md_filename_pwd = os.path.join(MD_FOLDER, md_filename)
-        with open(md_filename_pwd, 'w') as outfile:
-            outfile.write(md_text.encode('utf-8'))
+        # with open(md_filename_pwd, 'w') as outfile:
+        #    outfile.write(md_text.encode('utf-8'))
+        with open(md_filename_pwd, 'w', encoding='utf-8') as outfile:
+            outfile.write(md_text)
+
     logger.info(u'File "%s" is a list of chapters page ..', filename)
     logger.info(u'Finished conversion of HTML files to MD.')
 
@@ -152,19 +195,23 @@ def parse_html_to_md(logger, filename, html_txt, data):
 
 
 def parse_index_page(logger, filename, html_txt):
-    logger.info(u'File "%s" is an index page ..', filename)
-    dom = lxml.etree.fromstring(html_txt, lxml.etree.HTMLParser())
-    md_txt = u''
-    title = dom.find('body').find('h1').text
-    md_txt += u'# %s\n\n' % (title, )
-    li_elements = dom.find('body').find('ul').findall('li')
-    for li_element in li_elements:
-        a_element = li_element.find('a')
-        a_text = a_element.text
-        href = a_element.get('href').replace('.html', '.md')
-        md_txt += u'* [%s](%s)\n' % (a_text, href)
-    return md_txt
-
+    try:
+        logger.info('File "%s" is an index page ..', filename)
+        if isinstance(html_txt, bytes):
+            html_txt = html_txt.decode('utf-8')
+        logger.info('html_text = %s',html_txt)
+        dom = lxml.etree.fromstring(html_txt, lxml.etree.HTMLParser())
+        md_txt = '# %s\n\n' % (dom.find('body').find('h1').text, )
+        li_elements = dom.find('body').find('ul').findall('li')
+        for li_element in li_elements:
+            a_element = li_element.find('a')
+            a_text = a_element.text
+            href = a_element.get('href').replace('.html', '.md')
+            md_txt += '* [%s](%s)\n' % (a_text, href)
+        return md_txt
+    except Exception as e:
+        logger.error("Error processing index page '%s': %s", filename, str(e))
+        return None
 
 def parse_list_of_chapters_page(logger, filename, html_txt):
     logger.info(u'File "%s" is a list of chapters page ..', filename)
@@ -218,8 +265,6 @@ def parse_chapter_page(logger, filename, html_txt, data):
     char_to_number_map = {c: str(ord(c) - 96) for c in string.ascii_lowercase}
     tuple_of_txt_containers = (
         str,
-        unicode,
-        lxml.etree._ElementStringResult,
         lxml.etree._ElementUnicodeResult
     )
     for body_child in dom.find('body').getchildren():
@@ -337,8 +382,6 @@ def parse_law_page(logger, filename, html_txt, data):
     # parsing this nonsense might become very pesky, perhaps even impossible
     tuple_of_txt_containers = (
         str,
-        unicode,
-        lxml.etree._ElementStringResult,
         lxml.etree._ElementUnicodeResult
     )
     char_to_number_map = {c: str(ord(c) - 96) for c in string.ascii_lowercase}
@@ -362,7 +405,16 @@ def parse_law_page(logger, filename, html_txt, data):
 
     dom = lxml.etree.fromstring(html_txt, lxml.etree.HTMLParser())
     md_txt = u''
-    law_info = data['laws'][filename.replace('.html', '')]
+    # logger.info("Available keys in data['laws']: %s", list(data['laws'].keys()))
+    logger.info("Attempting to access key derived from filename: %s", filename.replace('.html', ''))
+
+    law_info_key = filename.replace('.html', '')
+    law_info = data['laws'].get(law_info_key, None)
+    if law_info is None:
+        logger.error("No law information found for '%s'. Skipping this file.", law_info_key)
+        return None  # Skip further processing for this file
+
+    # law_info = data['laws'][filename.replace('.html', '')]
     md_txt += u'# %s %s\n\n`%s`\n\n_%s_\n\n' % (
         law_info['chapter'],
         law_info['name'],
@@ -484,7 +536,16 @@ def parse_law_page(logger, filename, html_txt, data):
                     continue
                 if span_text in (u'\u2026', u'\u201e10', u' ', u''):
                     continue
-                span_int = int(span_text)
+                span_text = span_text.replace(u'\u2013', '-')  # Replace en dash
+                span_text = span_text.replace(u'\u2014', '-')  # Replace em dash
+                span_text = span_text.replace(u'\u2212', '-')  # Replace minus sign
+                try:
+                    span_int = int(span_text)
+                except ValueError:
+                    logger.error(f"Unable to convert '{span_text}' to an integer.")
+                    continue  # Skip further processing or handle the error as needed
+
+                # span_int = int(span_text)
                 if span_int > 1:
                     md_txt += u'\n'
                 md_txt += u'%s. ' % (span_int, )
@@ -554,7 +615,8 @@ def parse_law_page(logger, filename, html_txt, data):
         elif (tag == 'i' and len(element_or_str.getchildren()) == 0 and text is
               None):
             continue
-        elif tag == 'i' and element_or_str[0].getchildren() > 1:
+        # elif tag == 'i' and element_or_str[0].getchildren() > 1:
+        elif tag == 'i' and len(element_or_str[0].getchildren()) > 1:
             i_small_child_nodes = [
                 x for x in element_or_str[0].xpath("child::node()")
             ]
@@ -605,20 +667,14 @@ def parse_law_page(logger, filename, html_txt, data):
     md_txt += u'\n'
     return md_txt
 
-
 if __name__ == '__main__':
-    # TODO: figure out which CLI tools would be nice to have and add them
-    parser = argparse.ArgumentParser(u'Al\xfeingi lagasafn CLI')
-    parser.add_argument(
-        '--foo',
-        action='store',
-        type=str,
-        help='Help text for -foo',
-        required=False
-    )
+    parser = argparse.ArgumentParser('Alþingi lagasafn CLI')
     logging.basicConfig(level=DEFAULT_LOGGING_LVL)
     logger = logging.getLogger(__name__)
-    logger.info(u'Al\xfeingi lagasafn CLI started ..')
-    arguments = parser.parse_args()
-    download_and_extract_newest_lagasafn_zip(logger)
+    logger.info('Alþingi lagasafn CLI started ..')
+    # download_and_extract_newest_lagasafn_zip(logger)
+    # load_and_extract_lagasafn_zip(logger)
     convert_html_files_to_md_files(logger)
+
+
+
